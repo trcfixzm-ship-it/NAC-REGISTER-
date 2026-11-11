@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>New Apostolic Church Choir Register</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <style>
 :root{
   --bg:#f4f6fb;--card:#ffffff;--text:#1b2233;--muted:#5d667a;--accent:#1f3864;--accent-text:#ffffff;
@@ -151,11 +153,28 @@ body.admin #adminBtn{display:none}
 (function(){
   var VOICES=["Soprano","Alto","Tenor","Bass"];
   var HASH="TkFDMjAyNg==";
+  var ADMIN_PASSWORD="NAC2026";
   var rows=[],voice=null,col=null,admin=false,loaded=false;
   var $=function(id){return document.getElementById(id)};
+
+  // Replace this with your Firebase project config.
+  // If left blank, it falls back to local browser storage.
+  window.FIREBASE_CONFIG = window.FIREBASE_CONFIG || {
+    apiKey: "",
+    authDomain: "",
+    projectId: "",
+    storageBucket: "",
+    messagingSenderId: "",
+    appId: ""
+  };
+
   function say(t,cls){var m=$("msg");m.textContent=t||"";m.className="msg"+(cls?" "+cls:"")}
   function toolSay(t,cls){var m=$("toolMsg");m.textContent=t||"";m.className="msg noprint"+(cls?" "+cls:"")}
   function dateStr(){return new Date().toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})}
+  function hasFirebaseConfig(){
+    var c=window.FIREBASE_CONFIG||{};
+    return Boolean(c.projectId && c.apiKey && c.appId);
+  }
 
   VOICES.forEach(function(v){
     var b=document.createElement("button");b.type="button";b.textContent=v;b.setAttribute("aria-pressed","false");
@@ -185,7 +204,7 @@ body.admin #adminBtn{display:none}
       var dt=document.createElement("td");dt.className="delcol noprint";
       if(admin){
         var d=document.createElement("button");d.type="button";d.className="del";d.textContent="✕";d.setAttribute("aria-label","Remove "+r.name);
-        d.onclick=function(){if(confirm("Remove "+r.name+" from the register?")){col.doc(r.id).delete().catch(function(){say("Could not remove that entry.","err")})}};
+        d.onclick=function(){if(confirm("Remove "+r.name+" from the register?")){if(col&&col.doc){col.doc(r.id).delete().catch(function(){say("Could not remove that entry.","err")})}}};
         dt.appendChild(d);
       }
       tr.appendChild(dt);tb.appendChild(tr);
@@ -221,12 +240,16 @@ body.admin #adminBtn{display:none}
     }).catch(function(){say("Could not save. Please check your connection and access, then try again.","err")}).then(function(){btn.disabled=false});
   };
 
-  // Admin login (password checked instantly)
   function closePw(){$("pwOverlay").classList.remove("show");$("pw").value="";$("pwMsg").textContent=""}
   function gate(a){a()}
   function setAdmin(on){admin=on;toolSay("");render();window.scrollTo(0,0)}
+  function checkPassword(value){
+    var entered=(value||"").trim();
+    if(!entered)return false;
+    return btoa(entered)===HASH || entered===ADMIN_PASSWORD;
+  }
   function tryUnlock(){
-    if(btoa($("pw").value)===HASH){closePw();setAdmin(true)}
+    if(checkPassword($("pw").value)){closePw();setAdmin(true)}
     else{$("pwMsg").textContent="Incorrect password.";$("pw").select()}
   }
   $("adminBtn").onclick=function(){$("pwOverlay").classList.add("show");setTimeout(function(){$("pw").focus()},50)};
@@ -237,7 +260,6 @@ body.admin #adminBtn{display:none}
 
   $("printBtn").onclick=function(){gate(function(){try{window.print()}catch(e){toolSay("Use your browser menu to print.","err")}})};
 
-  // PDF register
   function buildPdf(){
     var J=window.jspdf&&window.jspdf.jsPDF;if(!J)return null;
     var doc=new J({unit:"mm",format:"a4"});
@@ -322,19 +344,48 @@ body.admin #adminBtn{display:none}
          doc:function(id){return {delete:function(){store=store.filter(function(x){return x.id!==id});save();return Promise.resolve()}}}};
     rows=store.slice();render();
   }
-  (async function(){
-    if(typeof claude==="undefined"){localMode();return}
-    var timer=setTimeout(function(){if(!loaded){$("empty").textContent="Cannot reach the list yet. Check your connection or access."}},10000);
+
+  function firebaseMode(){
+    if(!hasFirebaseConfig()){
+      localMode();
+      return;
+    }
     try{
-      var db=await claude.use("db");
-      if(!db){clearTimeout(timer);localMode();return}
-      col=db.collection("registrations");
+      if(!window.firebase || !window.firebase.firestore){
+        throw new Error("Firebase Firestore is not loaded.");
+      }
+      if(!firebase.apps.length){
+        firebase.initializeApp(window.FIREBASE_CONFIG);
+      }
+      col=firebase.firestore().collection("registrations");
       col.onSnapshot(function(snap){
-        clearTimeout(timer);loaded=true;
+        loaded=true;
         rows=snap.docs.map(function(d){var x=d.data()||{};return {id:d.id,name:String(x.name||""),congregation:String(x.congregation||""),voice:String(x.voice||"")}});
         render();
-      },function(){clearTimeout(timer);loaded=true;render();$("empty").style.display="";$("empty").textContent="The list could not be loaded."});
-    }catch(e){clearTimeout(timer);loaded=true;render();$("empty").style.display="";$("empty").textContent="The list could not be loaded."}
+      },function(){
+        loaded=true;render();$("empty").style.display="";$("empty").textContent="The list could not be loaded.";
+      });
+    }catch(e){
+      localMode();
+    }
+  }
+
+  (async function(){
+    if(typeof claude!=="undefined"){
+      var timer=setTimeout(function(){if(!loaded){$("empty").textContent="Cannot reach the list yet. Check your connection or access."}},10000);
+      try{
+        var db=await claude.use("db");
+        if(!db){clearTimeout(timer);firebaseMode();return}
+        col=db.collection("registrations");
+        col.onSnapshot(function(snap){
+          clearTimeout(timer);loaded=true;
+          rows=snap.docs.map(function(d){var x=d.data()||{};return {id:d.id,name:String(x.name||""),congregation:String(x.congregation||""),voice:String(x.voice||"")}});
+          render();
+        },function(){clearTimeout(timer);loaded=true;render();$("empty").style.display="";$("empty").textContent="The list could not be loaded."});
+      }catch(e){clearTimeout(timer);firebaseMode();}
+      return;
+    }
+    firebaseMode();
   })();
   render();
 })();
